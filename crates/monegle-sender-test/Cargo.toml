@@ -1,0 +1,28 @@
+[package]
+name = "monegle-sender-test"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "monegle-sender-test"
+path = "src/main.rs"
+
+[dependencies]
+monegle-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+
+# Blockchain with all necessary features
+alloy = { workspace = true, features = ["full", "signers", "signer-local", "rpc-types", "network"] }
+
+# Serialization for metrics export
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+
+# Time
+chrono = "0.4"

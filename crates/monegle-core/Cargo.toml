@@ -1,0 +1,24 @@
+[package]
+name = "monegle-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+config.workspace = true
+
+# Compression
+flate2 = "1.0"
+
+# Serialization
+bincode = "1.3"
+
+# Utilities
+thiserror = "1.0"
+
+# For synthetic frame generation (testing)
+rand = "0.8"

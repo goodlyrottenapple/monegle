@@ -1,0 +1,55 @@
+# Monegle Configuration Example
+# Copy this file to config.toml and customize for your setup
+
+[network]
+# Monad testnet RPC endpoint (HTTP for sender)
+rpc_url = "https://testnet-rpc.monad.xyz"
+
+# Chain ID for Monad testnet
+chain_id = 10143
+
+# Contract address (optional - not needed for WebSocket RPC approach)
+# contract_address = "0x..."
+
+[sender]
+# Video quality settings
+fps = 15                              # Frames per second (5-30 recommended)
+resolution = [220, 120]                 # [width, height] in characters
+
+# ASCII rendering
+character_set = "Detailed"            # Options: "Standard", "Dense", "Blocks", "Detailed"
+                                      # Recommended: "Detailed" for best quality with Unicode symbols
+
+# Color mode for terminal output
+color_mode = "Rgb"                    # Options: "None", "Purple", "Blue", "Green", "Rgb"
+                                      # "None" = monochrome
+                                      # "Purple/Blue/Green" = brightness gradients in that color
+                                      # "Rgb" = FULL COLOR using actual image colors! (recommended!)
+
+# Compression strategy
+compression = "Auto"                  # Options: "None", "Rle", "Delta", "Zlib", "Auto"
+                                     # "Auto" automatically selects best compression per frame
+
+# Batching configuration
+frames_per_batch = 6                  # For 15 FPS @ 400ms blocks: 6 frames per transaction
+
+# Camera settings
+camera_device = 0                     # Camera device index (0 = default camera)
+
+# Advanced settings
+max_batch_size = 120000               # Maximum batch size in bytes
+keyframe_interval = 30                # Send full frame every N frames
+
+[receiver]
+# Stream to receive (leave empty to specify via CLI)
+# stream_id = "0x..."
+
+# Buffering configuration
+buffer_blocks = 5                     # Blocks to buffer ahead
+
+# Display settings
+display_terminal = true               # Display video in terminal
+
+# Connection settings
+use_websocket = true                  # Use WebSocket (recommended)
+polling_interval = 400                # Polling interval in ms (if WebSocket disabled)

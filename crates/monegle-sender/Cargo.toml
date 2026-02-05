@@ -1,0 +1,36 @@
+[package]
+name = "monegle-sender"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "monegle-sender"
+path = "src/main.rs"
+
+[dependencies]
+monegle-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+config.workspace = true
+alloy.workspace = true
+
+# Video capture
+nokhwa = { version = "0.10", features = ["input-native"] }
+
+# Image processing
+image = "0.25"
+artem = "3.0"
+
+# Async
+futures = "0.3"
+
+# Time
+chrono = "0.4"
+
+# Utilities
+hex = "0.4"

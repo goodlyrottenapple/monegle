@@ -1,0 +1,42 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Configuration (may contain secrets)
+config.toml
+*.env
+.env
+
+# Contract artifacts
+/contracts/out/
+/contracts/cache/
+/contracts/lib/
+
+# Deployment outputs
+contract-address.txt
+
+# Logs
+*.log
+
+# Build artifacts
+/dist/
+/build/
+
+# Private keys (NEVER commit these!)
+*.key
+*.pem
+private_key*
+
+# Temporary files
+/tmp/
+*.tmp

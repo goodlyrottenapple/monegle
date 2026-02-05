@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "crates/monegle-core",
+    "crates/monegle-sender",
+    "crates/monegle-receiver",
+    "crates/monegle-sender-test",
+    "crates/camera-test",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Monegle Team"]
+license = "MIT"
+
+[workspace.dependencies]
+# Shared dependencies across workspace
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive"] }
+config = "0.14"
+toml = "0.8"
+
+# Blockchain
+alloy = { version = "0.6", features = ["full"] }
+alloy-ws = "0.6"  # WebSocket support for receiver
+
+# Internal workspace crates
+monegle-core = { path = "crates/monegle-core" }
