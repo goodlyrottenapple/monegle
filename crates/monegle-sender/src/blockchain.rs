@@ -88,10 +88,10 @@ impl BlockchainSender {
         self.sender_address
     }
 
-    /// Submit a batch of frames via raw transaction
+    /// Submit a batch of frames via raw transaction (FAST - doesn't wait for confirmation)
     /// This sends the frame data directly in calldata to the target address
     /// Receiver monitors transactions via WebSocket RPC subscriptions
-    pub async fn submit_batch(&self, batch: &FrameBatch) -> Result<TransactionReceipt> {
+    pub async fn submit_batch_fast(&self, batch: &FrameBatch) -> Result<String> {
         debug!("Submitting batch {} via raw transaction", batch.sequence);
 
         // Encode frame batch to bytes
@@ -114,64 +114,99 @@ impl BlockchainSender {
                 anyhow!("Transaction send failed: {}", e)
             })?;
 
-        debug!("Transaction sent: {:?}", pending_tx.tx_hash());
-
-        let receipt = pending_tx.get_receipt().await.map_err(|e| {
-            error!("Failed to get receipt: {}", e);
-            anyhow!("Failed to get receipt: {}", e)
-        })?;
+        let tx_hash = format!("{:?}", pending_tx.tx_hash());
 
         info!(
-            "Batch {} confirmed: tx={:?}, gas={}, size={}KB",
+            "Batch {} submitted: tx={}, size={}KB (not waiting for confirmation)",
             batch.sequence,
-            receipt.transaction_hash,
-            receipt.gas_used,
+            tx_hash,
             calldata_len / 1024
         );
 
-        Ok(receipt)
+        Ok(tx_hash)
     }
 
-    /// Start submission loop
+    /// Start submission loop (RATE-LIMITED MODE - submits with small delay between txs)
     pub async fn start_submission_loop(
         self,
         mut rx: mpsc::Receiver<FrameBatch>,
     ) -> Result<()> {
-        info!("Starting submission loop");
+        info!("Starting rate-limited submission loop");
         info!("Receivers should monitor transactions FROM: {}", self.sender_address);
+        info!("Transactions will be submitted with 1.5s delay between each (max ~0.67 tx/sec)");
 
         let mut submitted_count = 0u64;
-        let mut total_gas = 0u128;
         let mut total_bytes = 0usize;
+        let start_time = std::time::Instant::now();
+        let mut last_submit_time = std::time::Instant::now();
+
+        // Rate limiting: minimum time between transactions
+        // Increased to 1.5 seconds to give RPC node time to update nonces
+        let min_interval = std::time::Duration::from_millis(1500); // 1.5s between txs
 
         while let Some(batch) = rx.recv().await {
-            match self.submit_batch(&batch).await {
-                Ok(receipt) => {
+            // Wait if we're submitting too fast
+            let elapsed_since_last = last_submit_time.elapsed();
+            if elapsed_since_last < min_interval {
+                let wait_time = min_interval - elapsed_since_last;
+                debug!("Rate limiting: waiting {:?} before next submission", wait_time);
+                tokio::time::sleep(wait_time).await;
+            }
+
+            match self.submit_batch_fast(&batch).await {
+                Ok(tx_hash) => {
                     submitted_count += 1;
-                    total_gas += receipt.gas_used;
                     total_bytes += batch.size_bytes();
+                    last_submit_time = std::time::Instant::now();
 
                     if submitted_count % 10 == 0 {
-                        let avg_gas = total_gas / submitted_count as u128;
+                        let elapsed = start_time.elapsed().as_secs_f32();
+                        let rate = submitted_count as f32 / elapsed;
                         let avg_bytes = total_bytes / submitted_count as usize;
                         info!(
-                            "Submitted {} batches, avg gas: {}, avg size: {}KB",
-                            submitted_count, avg_gas, avg_bytes / 1024
+                            "Submitted {} batches in {:.1}s ({:.1} tx/sec), avg size: {}KB",
+                            submitted_count, elapsed, rate, avg_bytes / 1024
                         );
                     }
+
+                    debug!("Batch {} submitted: {}", batch.sequence, tx_hash);
                 }
                 Err(e) => {
                     error!("Failed to submit batch {}: {}", batch.sequence, e);
-                    warn!("Continuing with next batch...");
+
+                    // If it's a nonce error, wait longer for mempool to clear
+                    if e.to_string().contains("higher priority") || e.to_string().contains("nonce") {
+                        warn!("Nonce collision detected - waiting 3 seconds for mempool to clear...");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    } else {
+                        warn!("Retrying after 2 second delay...");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+
+                    // Try one more time
+                    match self.submit_batch_fast(&batch).await {
+                        Ok(tx_hash) => {
+                            submitted_count += 1;
+                            total_bytes += batch.size_bytes();
+                            last_submit_time = std::time::Instant::now();
+                            info!("✓ Retry successful for batch {}: {}", batch.sequence, tx_hash);
+                        }
+                        Err(e2) => {
+                            error!("✗ Retry failed for batch {}: {}", batch.sequence, e2);
+                            warn!("Skipping batch {} and continuing...", batch.sequence);
+                        }
+                    }
                 }
             }
         }
 
-        info!("Submission loop stopped gracefully");
+        let elapsed = start_time.elapsed().as_secs_f32();
+        let rate = submitted_count as f32 / elapsed;
 
+        info!("Submission loop stopped gracefully");
         info!(
-            "Total batches submitted: {}, total gas: {}, total data: {}KB",
-            submitted_count, total_gas, total_bytes / 1024
+            "Total: {} batches in {:.1}s ({:.1} tx/sec), {}KB total data",
+            submitted_count, elapsed, rate, total_bytes / 1024
         );
 
         Ok(())

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
 /// Frame buffer for smooth playback
@@ -61,6 +62,21 @@ impl FrameBuffer {
 
     /// Get the next frame for playback
     pub fn next_frame(&mut self) -> Result<String> {
+        // If current sequence is not in buffer, try to find the earliest available sequence
+        if !self.buffer.contains_key(&self.current_sequence) {
+            let min_seq = self.buffer.keys().min().copied();
+            if let Some(seq) = min_seq {
+                info!(
+                    "Current sequence {} not in buffer, jumping to earliest sequence {}",
+                    self.current_sequence, seq
+                );
+                self.current_sequence = seq;
+                self.current_frame_index = 0;
+            } else {
+                return Err(anyhow!("Buffer is empty"));
+            }
+        }
+
         // Get frames for current sequence
         let frames = self.buffer.get(&self.current_sequence)
             .ok_or_else(|| anyhow!("Sequence {} not in buffer", self.current_sequence))?;
@@ -69,6 +85,17 @@ impl FrameBuffer {
             // Move to next sequence
             self.current_sequence += 1;
             self.current_frame_index = 0;
+
+            // Again check if the next sequence exists, if not jump to earliest
+            if !self.buffer.contains_key(&self.current_sequence) {
+                let min_seq = self.buffer.keys().min().copied();
+                if let Some(seq) = min_seq {
+                    debug!("Sequence {} not available, jumping to {}", self.current_sequence, seq);
+                    self.current_sequence = seq;
+                } else {
+                    return Err(anyhow!("No more sequences in buffer"));
+                }
+            }
 
             let frames = self.buffer.get(&self.current_sequence)
                 .ok_or_else(|| anyhow!("Sequence {} not in buffer", self.current_sequence))?;
@@ -120,65 +147,111 @@ pub struct BufferStats {
 
 /// Buffering controller
 pub struct BufferController {
-    buffer: FrameBuffer,
+    buffer: Arc<Mutex<FrameBuffer>>,
+    initial_buffer_batches: usize,
 }
 
 impl BufferController {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, initial_buffer_batches: usize) -> Self {
         Self {
-            buffer: FrameBuffer::new(capacity),
+            buffer: Arc::new(Mutex::new(FrameBuffer::new(capacity))),
+            initial_buffer_batches,
         }
     }
 
-    /// Start buffering loop
+    /// Start buffering and playback loop
     pub async fn start_buffering_loop(
-        mut self,
+        self,
         mut rx: mpsc::Receiver<(u64, Vec<String>)>,
         tx: mpsc::Sender<String>,
         target_fps: f32,
     ) -> Result<()> {
-        info!("Starting buffering loop (target FPS: {})", target_fps);
+        info!("Starting buffering loop (target FPS: {}, initial buffer: {} batches)",
+            target_fps, self.initial_buffer_batches);
 
-        // Buffering phase
-        info!("Buffering initial frames...");
+        let buffer_clone = self.buffer.clone();
 
-        while let Some((sequence, frames)) = rx.recv().await {
-            self.buffer.add_batch(sequence, frames);
-
-            if self.buffer.is_ready() {
-                info!("Buffer ready, starting playback");
-                break;
-            }
-        }
-
-        // Playback phase
-        let frame_interval = std::time::Duration::from_secs_f32(1.0 / target_fps);
-        let mut interval = tokio::time::interval(frame_interval);
-
-        // Spawn task to continue buffering
-        let buffer_handle = tokio::spawn(async move {
+        // Spawn buffering task that continuously receives and buffers
+        let buffering_handle = tokio::spawn(async move {
+            let mut batch_count = 0;
             while let Some((sequence, frames)) = rx.recv().await {
-                // This would need access to buffer, which we moved
-                // In a real implementation, we'd use Arc<Mutex<FrameBuffer>>
-                debug!("Received batch {}", sequence);
+                batch_count += 1;
+                let mut buffer = buffer_clone.lock().await;
+                buffer.add_batch(sequence, frames);
+
+                if batch_count % 5 == 0 {
+                    let stats = buffer.stats();
+                    info!("Buffered {} batches, buffer: {} sequences, {} frames",
+                        batch_count, stats.sequences, stats.frames);
+                }
             }
+            info!("Buffering task stopped after {} batches", batch_count);
         });
 
+        // Wait for initial buffer
+        info!("Waiting for {} batches before starting playback...", self.initial_buffer_batches);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            let buffer = self.buffer.lock().await;
+            let stats = buffer.stats();
+
+            if stats.sequences >= self.initial_buffer_batches {
+                info!("Buffer ready! {} sequences, {} frames total", stats.sequences, stats.frames);
+                break;
+            }
+
+            info!("Buffering... {}/{} batches", stats.sequences, self.initial_buffer_batches);
+        }
+
+        // Playback phase with adaptive FPS
+        info!("Starting playback with {}s delay for smooth buffering", self.initial_buffer_batches * 7);
+
         let mut frame_count = 0u64;
+        let start_time = std::time::Instant::now();
+        let mut last_stats_time = start_time;
 
         loop {
-            interval.tick().await;
+            // Adaptive delay based on buffer depth
+            let buffer_depth = {
+                let buffer = self.buffer.lock().await;
+                buffer.stats().frames
+            };
 
-            match self.buffer.next_frame() {
+            // Slow down if buffer is getting low, speed up if buffer is large
+            let adaptive_fps = if buffer_depth < 10 {
+                target_fps * 0.5  // Half speed if buffer low
+            } else if buffer_depth > 50 {
+                target_fps * 1.5  // 1.5x speed if buffer high
+            } else {
+                target_fps
+            };
+
+            let frame_interval = std::time::Duration::from_secs_f32(1.0 / adaptive_fps);
+            tokio::time::sleep(frame_interval).await;
+
+            // Get next frame
+            let frame = {
+                let mut buffer = self.buffer.lock().await;
+                buffer.next_frame()
+            };
+
+            match frame {
                 Ok(frame) => {
                     frame_count += 1;
 
-                    if frame_count % 100 == 0 {
-                        let stats = self.buffer.stats();
+                    // Log stats every 5 seconds
+                    if last_stats_time.elapsed().as_secs() >= 5 {
+                        let buffer = self.buffer.lock().await;
+                        let stats = buffer.stats();
+                        let elapsed = start_time.elapsed().as_secs_f32();
+                        let actual_fps = frame_count as f32 / elapsed;
+
                         info!(
-                            "Played {} frames, buffer: {} sequences, {} frames",
-                            frame_count, stats.sequences, stats.frames
+                            "Playback: {} frames ({:.1} FPS), buffer: {} seqs / {} frames, adaptive FPS: {:.1}",
+                            frame_count, actual_fps, stats.sequences, stats.frames, adaptive_fps
                         );
+                        last_stats_time = std::time::Instant::now();
                     }
 
                     if tx.send(frame).await.is_err() {
@@ -187,16 +260,19 @@ impl BufferController {
                     }
                 }
                 Err(e) => {
-                    warn!("Buffer underrun: {}", e);
-                    // Wait for more frames
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    warn!("Buffer underrun: {} - waiting for more frames", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
         }
 
-        buffer_handle.abort();
+        buffering_handle.abort();
 
-        info!("Buffering loop stopped after {} frames", frame_count);
+        let elapsed = start_time.elapsed().as_secs_f32();
+        let avg_fps = frame_count as f32 / elapsed;
+        info!("Buffering loop stopped: {} frames in {:.1}s ({:.1} FPS average)",
+            frame_count, elapsed, avg_fps);
+
         Ok(())
     }
 }

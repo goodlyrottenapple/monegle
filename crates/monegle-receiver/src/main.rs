@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
 
     // Create channels for pipeline
     let (batch_tx, mut batch_rx) = mpsc::channel::<FrameBatch>(10);
-    let (frame_tx, mut frame_rx) = mpsc::channel::<String>(100);
+    let (frame_tx, mut frame_rx) = mpsc::channel::<(u64, Vec<String>)>(100);
 
     // Determine connection method
     let use_websocket = !args.no_websocket && receiver_config.use_websocket;
@@ -108,7 +108,10 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Spawn decoder task
+    // Create buffered frames channel
+    let (buffered_tx, mut buffered_rx) = mpsc::channel(100);
+
+    // Spawn decoder task - outputs (sequence, frames)
     let mut last_metadata: Option<monegle_core::StreamMetadata> = None;
     tokio::spawn(async move {
         let mut decoder = FrameDecoder::new();
@@ -130,11 +133,10 @@ async fn main() -> Result<()> {
 
             match decoder.decode_batch(&batch) {
                 Ok(frames) => {
-                    for frame in frames {
-                        if frame_tx.send(frame).await.is_err() {
-                            info!("Frame channel closed, stopping decoder");
-                            return;
-                        }
+                    // Send as (sequence, frames) for buffering
+                    if frame_tx.send((batch.sequence, frames)).await.is_err() {
+                        info!("Frame channel closed, stopping decoder");
+                        return;
                     }
                 }
                 Err(e) => {
@@ -146,27 +148,43 @@ async fn main() -> Result<()> {
         info!("Decoder stopped");
     });
 
+    // Start buffering controller
+    info!("Starting buffer controller (will wait for 5 batches before playback)");
+    let buffer_controller = crate::buffer::BufferController::new(
+        20,  // Buffer capacity: 20 batches
+        5,   // Initial buffer: wait for 5 batches (~35 seconds of buffering)
+    );
+
+    tokio::spawn(async move {
+        if let Err(e) = buffer_controller.start_buffering_loop(
+            frame_rx,
+            buffered_tx,
+            15.0,  // Target FPS (adaptive playback will adjust)
+        ).await {
+            error!("Buffer controller error: {}", e);
+        }
+    });
+
     // Display frames
     if !args.no_display && receiver_config.display_terminal {
         info!("Starting terminal display");
-        info!("Waiting for stream metadata from first batch...");
+        info!("Waiting for buffered frames...");
 
         // Use sensible defaults for display parameters
-        // (These will be overridden by actual metadata from the stream)
         let display = TerminalDisplay::new(
-            15,  // Default FPS (will be updated from metadata)
-            80,  // Default width (will be updated from metadata)
-            60,  // Default height (will be updated from metadata)
+            15,  // Default FPS
+            80,  // Default width
+            60,  // Default height
             sender_address.clone(),  // Stream ID
         );
 
-        if let Err(e) = display.start_display_loop(frame_rx).await {
+        if let Err(e) = display.start_display_loop(buffered_rx).await {
             error!("Display error: {}", e);
         }
     } else {
         info!("Headless mode - receiving frames without display");
 
-        while let Some(_frame) = frame_rx.recv().await {
+        while let Some(_frame) = buffered_rx.recv().await {
             // Just receive and discard (for testing)
         }
     }

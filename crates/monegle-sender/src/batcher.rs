@@ -68,20 +68,47 @@ impl FrameBatcher {
         // Store for next delta encoding
         self.previous_frame = Some(ascii_frame);
 
-        self.current_batch.push(compressed);
-        self.frame_counter += 1;
+        // Check if adding this frame would exceed the limit BEFORE adding it
+        // This prevents oversized batches
+        if !self.current_batch.is_empty() {
+            self.current_batch.push(compressed.clone());
+            let estimated_size = self.estimate_batch_size();
 
-        // Check if batch is ready
-        if self.current_batch.len() >= self.frames_per_batch {
-            return self.finalize_batch();
+            if estimated_size > self.max_batch_size {
+                // Remove the frame we just added and finalize without it
+                self.current_batch.pop();
+
+                debug!(
+                    "Adding frame {} would exceed limit ({}KB > {}KB), finalizing batch with {} frames",
+                    self.frame_counter,
+                    estimated_size / 1024,
+                    self.max_batch_size / 1024,
+                    self.current_batch.len()
+                );
+
+                // Finalize current batch
+                let batch = self.finalize_batch()?;
+
+                // Start new batch with the frame we just compressed
+                self.current_batch.push(compressed);
+                self.frame_counter += 1;
+
+                return Ok(batch);
+            }
+
+            // Frame fits, keep it and increment counter
+            self.frame_counter += 1;
+        } else {
+            // First frame in batch, always add it
+            self.current_batch.push(compressed);
+            self.frame_counter += 1;
         }
 
-        // Check if batch size exceeds limit
-        let estimated_size = self.estimate_batch_size();
-        if estimated_size > self.max_batch_size {
-            warn!(
-                "Batch size {} exceeds limit {}, finalizing early",
-                estimated_size, self.max_batch_size
+        // Check if batch has reached target frame count
+        if self.current_batch.len() >= self.frames_per_batch {
+            debug!(
+                "Batch reached target size ({} frames), finalizing",
+                self.current_batch.len()
             );
             return self.finalize_batch();
         }
