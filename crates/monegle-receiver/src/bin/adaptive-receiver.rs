@@ -35,19 +35,30 @@ struct Args {
     /// Resume buffer threshold (multiplier of FPS)
     #[arg(long, default_value = "5")]
     resume_buffer_multiplier: u32,
+
+    /// Enable logging (disabled by default to show clean video)
+    #[arg(long)]
+    log: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
-        )
-        .init();
-
     let args = Args::parse();
+
+    // Initialize tracing only if --log flag is set
+    if args.log {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+            )
+            .init();
+    } else {
+        // Silent mode - only show the rendered video
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .init();
+    }
 
     let initial_buffer_size = args.fps * args.initial_buffer_multiplier;
     let resume_buffer_size = args.fps * args.resume_buffer_multiplier;
@@ -74,10 +85,10 @@ async fn main() -> Result<()> {
     let (decoded_tx, decoded_rx) = mpsc::channel::<DecodedFrame>(1000);
 
     // Spawn decoder task
-    tokio::spawn(decode_task(batch_rx, decoded_tx));
+    tokio::spawn(decode_task(batch_rx, decoded_tx, args.log));
 
     // Run playback task
-    playback_task(decoded_rx, args.fps, initial_buffer_size as usize, resume_buffer_size as usize).await?;
+    playback_task(decoded_rx, args.fps, initial_buffer_size as usize, resume_buffer_size as usize, args.log).await?;
 
     Ok(())
 }
@@ -93,8 +104,11 @@ struct DecodedFrame {
 async fn decode_task(
     mut batch_rx: mpsc::Receiver<FrameBatch>,
     decoded_tx: mpsc::Sender<DecodedFrame>,
+    enable_logging: bool,
 ) {
-    info!("Decoder task started");
+    if enable_logging {
+        info!("Decoder task started");
+    }
 
     let mut previous_frame: Option<String> = None;
     let mut total_decoded = 0u64;
@@ -129,7 +143,7 @@ async fn decode_task(
                         return;
                     }
 
-                    if total_decoded % 10 == 0 {
+                    if enable_logging && total_decoded % 10 == 0 {
                         let elapsed = start_time.elapsed().as_secs_f32();
                         let decode_fps = total_decoded as f32 / elapsed;
                         info!("🔧 DECODED {} frames | Rate: {:.1} FPS | Elapsed: {:.1}s",
@@ -143,7 +157,9 @@ async fn decode_task(
         }
     }
 
-    info!("Decoder task ended: {} frames decoded", total_decoded);
+    if enable_logging {
+        info!("Decoder task ended: {} frames decoded", total_decoded);
+    }
 }
 
 /// Playback task: buffers decoded frames, displays at target FPS
@@ -152,8 +168,11 @@ async fn playback_task(
     target_fps: u32,
     initial_buffer_size: usize,
     resume_buffer_size: usize,
+    enable_logging: bool,
 ) -> Result<()> {
-    info!("Playback task started");
+    if enable_logging {
+        info!("Playback task started");
+    }
 
     let mut buffer: VecDeque<DecodedFrame> = VecDeque::with_capacity(initial_buffer_size * 2);
     let frame_interval = tokio::time::Duration::from_secs_f32(1.0 / target_fps as f32);
@@ -164,7 +183,9 @@ async fn playback_task(
     let start_time = std::time::Instant::now();
     let mut is_playing = false;
 
-    info!("⏸️  BUFFERING: Collecting initial {} frames...", initial_buffer_size);
+    if enable_logging {
+        info!("⏸️  BUFFERING: Collecting initial {} frames...", initial_buffer_size);
+    }
 
     loop {
         tokio::select! {
@@ -174,12 +195,14 @@ async fn playback_task(
 
                 // Start playing once we reach initial buffer size
                 if !is_playing && buffer.len() >= initial_buffer_size {
-                    info!("▶️  PLAYING: Buffer full ({} frames), starting playback at {} FPS", buffer.len(), target_fps);
+                    if enable_logging {
+                        info!("▶️  PLAYING: Buffer full ({} frames), starting playback at {} FPS", buffer.len(), target_fps);
+                    }
                     is_playing = true;
                 }
 
                 // Log buffer state periodically
-                if buffer.len() % 50 == 0 {
+                if enable_logging && buffer.len() % 50 == 0 {
                     info!("📦 Buffer: {} frames", buffer.len());
                 }
             }
@@ -189,24 +212,30 @@ async fn playback_task(
                 if let Some(frame) = buffer.pop_front() {
                     // Display frame
                     print!("\x1B[2J\x1B[H"); // Clear screen
-                    println!("╔════════════════════════════════════════════════════════╗");
-                    println!("║  Monegle Adaptive Receiver - Press Ctrl+C to stop    ║");
-                    println!("╠════════════════════════════════════════════════════════╣");
-                    println!("║  Frame: {}  Buffer: {}  Seq: {}  FPS: {:.1}     ║",
-                        frames_displayed,
-                        buffer.len(),
-                        frame.sequence,
-                        target_fps
-                    );
-                    println!("╚════════════════════════════════════════════════════════╝");
-                    println!();
-                    println!("{}", frame.text);
-                    println!();
 
-                    let elapsed = start_time.elapsed().as_secs_f32();
-                    let actual_fps = frames_displayed as f32 / elapsed;
-                    println!("Displayed: {} | Actual FPS: {:.1} | Elapsed: {:.1}s | Buffer: {} frames",
-                        frames_displayed, actual_fps, elapsed, buffer.len());
+                    if enable_logging {
+                        println!("╔════════════════════════════════════════════════════════╗");
+                        println!("║  Monegle Adaptive Receiver - Press Ctrl+C to stop    ║");
+                        println!("╠════════════════════════════════════════════════════════╣");
+                        println!("║  Frame: {}  Buffer: {}  Seq: {}  FPS: {:.1}     ║",
+                            frames_displayed,
+                            buffer.len(),
+                            frame.sequence,
+                            target_fps
+                        );
+                        println!("╚════════════════════════════════════════════════════════╝");
+                        println!();
+                    }
+
+                    println!("{}", frame.text);
+
+                    if enable_logging {
+                        println!();
+                        let elapsed = start_time.elapsed().as_secs_f32();
+                        let actual_fps = frames_displayed as f32 / elapsed;
+                        println!("Displayed: {} | Actual FPS: {:.1} | Elapsed: {:.1}s | Buffer: {} frames",
+                            frames_displayed, actual_fps, elapsed, buffer.len());
+                    }
 
                     stdout.flush()?;
 
@@ -215,7 +244,9 @@ async fn playback_task(
 
                     // Check if buffer is running low
                     if buffer.is_empty() {
-                        info!("⏸️  PAUSED: Buffer empty, waiting for {} frames to resume...", resume_buffer_size);
+                        if enable_logging {
+                            info!("⏸️  PAUSED: Buffer empty, waiting for {} frames to resume...", resume_buffer_size);
+                        }
                         is_playing = false;
                     }
                 } else {
@@ -234,15 +265,19 @@ async fn playback_task(
 
         // Resume playback when buffer reaches resume threshold
         if !is_playing && buffer.len() >= resume_buffer_size {
-            info!("▶️  RESUMED: Buffer at {} frames, resuming playback", buffer.len());
+            if enable_logging {
+                info!("▶️  RESUMED: Buffer at {} frames, resuming playback", buffer.len());
+            }
             is_playing = true;
         }
     }
 
-    let elapsed = start_time.elapsed().as_secs_f32();
-    let avg_fps = frames_displayed as f32 / elapsed;
-    info!("Playback ended: {} frames in {:.1}s ({:.1} FPS average)",
-        frames_displayed, elapsed, avg_fps);
+    if enable_logging {
+        let elapsed = start_time.elapsed().as_secs_f32();
+        let avg_fps = frames_displayed as f32 / elapsed;
+        info!("Playback ended: {} frames in {:.1}s ({:.1} FPS average)",
+            frames_displayed, elapsed, avg_fps);
+    }
 
     Ok(())
 }
