@@ -63,8 +63,18 @@ impl TransactionListener {
 
         info!("Subscribed to new blocks via WebSocket");
 
+        let mut block_count = 0u64;
+        let mut last_heartbeat = std::time::Instant::now();
+
         while let Some(block_header) = stream.next().await {
             let block_number = block_header.number;
+            block_count += 1;
+
+            // Heartbeat every 10 blocks or every 10 seconds
+            if block_count % 10 == 0 || last_heartbeat.elapsed().as_secs() >= 10 {
+                info!("💓 WebSocket heartbeat: processed {} blocks (current: {})", block_count, block_number);
+                last_heartbeat = std::time::Instant::now();
+            }
 
             debug!("New block: {}", block_number);
 

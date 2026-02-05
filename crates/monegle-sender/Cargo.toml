@@ -34,3 +34,4 @@ chrono = "0.4"
 
 # Utilities
 hex = "0.4"
+rand = "0.8"

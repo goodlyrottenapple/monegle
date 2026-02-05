@@ -2,7 +2,7 @@ use alloy::{
     network::{EthereumWallet, TransactionBuilder},
     primitives::{Address, Bytes},
     providers::{Provider, ProviderBuilder},
-    rpc::types::{TransactionReceipt, TransactionRequest},
+    rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
     transports::http::reqwest::Url,
 };
@@ -156,20 +156,23 @@ impl BlockchainSender {
             match self.submit_batch_fast(&batch).await {
                 Ok(tx_hash) => {
                     submitted_count += 1;
-                    total_bytes += batch.size_bytes();
+                    let num_frames = batch.frames.len();
+                    let batch_size_bytes = batch.size_bytes();
+                    let total_frames = submitted_count * num_frames as u64;
+                    total_bytes += batch_size_bytes;
                     last_submit_time = std::time::Instant::now();
 
-                    if submitted_count % 10 == 0 {
-                        let elapsed = start_time.elapsed().as_secs_f32();
-                        let rate = submitted_count as f32 / elapsed;
-                        let avg_bytes = total_bytes / submitted_count as usize;
-                        info!(
-                            "Submitted {} batches in {:.1}s ({:.1} tx/sec), avg size: {}KB",
-                            submitted_count, elapsed, rate, avg_bytes / 1024
-                        );
-                    }
+                    let elapsed = start_time.elapsed().as_secs_f32();
+                    let batch_rate = submitted_count as f32 / elapsed;
+                    let frame_rate = total_frames as f32 / elapsed;
+                    let avg_size_kb = total_bytes / submitted_count as usize / 1024;
 
-                    debug!("Batch {} submitted: {}", batch.sequence, tx_hash);
+                    info!(
+                        "📤 SUBMITTED batch {} ({} frames, {} KB) | Total: {} batches, {} frames, avg {}KB/batch | Rate: {:.2} batch/s, {:.1} FPS | Elapsed: {:.1}s",
+                        batch.sequence, num_frames, batch_size_bytes / 1024, submitted_count, total_frames, avg_size_kb, batch_rate, frame_rate, elapsed
+                    );
+
+                    debug!("Batch {} tx: {}", batch.sequence, tx_hash);
                 }
                 Err(e) => {
                     error!("Failed to submit batch {}: {}", batch.sequence, e);

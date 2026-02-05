@@ -46,6 +46,17 @@ impl TerminalDisplay {
         let first_frame = rx.recv().await.ok_or_else(|| anyhow::anyhow!("No frames received"))?;
         let has_ansi_codes = first_frame.contains("\x1b[");
 
+        // Try to detect if we have a terminal available
+        let has_terminal = enable_raw_mode().is_ok();
+        if has_terminal {
+            let _ = disable_raw_mode(); // Clean up the test
+        }
+
+        if !has_terminal {
+            info!("No terminal detected - using file logging mode");
+            return self.start_file_logging_mode(rx, first_frame).await;
+        }
+
         if has_ansi_codes {
             info!("Detected ANSI color codes - using direct terminal output");
             self.start_direct_display_loop(rx, first_frame).await
@@ -166,6 +177,65 @@ impl TerminalDisplay {
         info!("Terminal display stopped after {} frames", frame_count);
 
         result
+    }
+
+    /// File logging mode (for background execution without terminal)
+    async fn start_file_logging_mode(
+        self,
+        mut rx: mpsc::Receiver<String>,
+        first_frame: String,
+    ) -> Result<()> {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        let log_path = "/tmp/monegle_frames.log";
+        info!("Writing frames to: {}", log_path);
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(log_path)?;
+
+        let mut frame_count = 0u64;
+        let start_time = std::time::Instant::now();
+        let mut fps_counter = FpsCounter::new();
+
+        // Write first frame
+        writeln!(file, "=")?;
+        writeln!(file, "FRAME {} | Time: {:.1}s | FPS: {:.1}",
+            frame_count, start_time.elapsed().as_secs_f32(), fps_counter.fps())?;
+        writeln!(file, "=")?;
+        writeln!(file, "{}", first_frame)?;
+        writeln!(file)?;
+        file.flush()?;
+
+        frame_count += 1;
+        fps_counter.tick();
+
+        info!("Logged frame {} to {}", 0, log_path);
+
+        // Write subsequent frames
+        while let Some(frame) = rx.recv().await {
+            fps_counter.tick();
+
+            writeln!(file, "=")?;
+            writeln!(file, "FRAME {} | Time: {:.1}s | FPS: {:.1}",
+                frame_count, start_time.elapsed().as_secs_f32(), fps_counter.fps())?;
+            writeln!(file, "=")?;
+            writeln!(file, "{}", frame)?;
+            writeln!(file)?;
+            file.flush()?;
+
+            if frame_count % 10 == 0 {
+                info!("Logged frame {} to {} (FPS: {:.1})", frame_count, log_path, fps_counter.fps());
+            }
+
+            frame_count += 1;
+        }
+
+        info!("File logging ended after {} frames", frame_count);
+        Ok(())
     }
 
     /// Render a single frame

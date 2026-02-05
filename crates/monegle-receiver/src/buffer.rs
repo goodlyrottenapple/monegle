@@ -51,12 +51,24 @@ impl FrameBuffer {
         self.frame_count += frames.len();
         self.buffer.insert(sequence, frames);
 
+        // Get sequence range for context
+        let mut seqs: Vec<u64> = self.buffer.keys().copied().collect();
+        seqs.sort();
+        let seq_range = if !seqs.is_empty() {
+            format!("{}-{}", seqs[0], seqs[seqs.len()-1])
+        } else {
+            "empty".to_string()
+        };
+
         debug!(
-            "Buffered sequence {} ({} frames), total buffered: {} frames in {} sequences",
+            "Buffered sequence {} ({} frames), total: {} frames in {} seqs (range: {}), current playback: seq {} frame {}",
             sequence,
             self.buffer.get(&sequence).map(|f| f.len()).unwrap_or(0),
             self.frame_count,
-            self.buffer.len()
+            self.buffer.len(),
+            seq_range,
+            self.current_sequence,
+            self.current_frame_index
         );
     }
 
@@ -83,6 +95,7 @@ impl FrameBuffer {
 
         if self.current_frame_index >= frames.len() {
             // Move to next sequence
+            let old_sequence = self.current_sequence;
             self.current_sequence += 1;
             self.current_frame_index = 0;
 
@@ -90,7 +103,11 @@ impl FrameBuffer {
             if !self.buffer.contains_key(&self.current_sequence) {
                 let min_seq = self.buffer.keys().min().copied();
                 if let Some(seq) = min_seq {
-                    debug!("Sequence {} not available, jumping to {}", self.current_sequence, seq);
+                    if seq < old_sequence {
+                        warn!("⚠️  SEQUENCE JUMP BACKWARDS: from {} to {} (buffer underrun or restart)", old_sequence, seq);
+                    } else {
+                        debug!("Sequence {} not available, jumping forward to {}", self.current_sequence, seq);
+                    }
                     self.current_sequence = seq;
                 } else {
                     return Err(anyhow!("No more sequences in buffer"));
@@ -174,18 +191,27 @@ impl BufferController {
         // Spawn buffering task that continuously receives and buffers
         let buffering_handle = tokio::spawn(async move {
             let mut batch_count = 0;
+            let mut last_log = std::time::Instant::now();
+
             while let Some((sequence, frames)) = rx.recv().await {
                 batch_count += 1;
-                let mut buffer = buffer_clone.lock().await;
-                buffer.add_batch(sequence, frames);
+                {
+                    let mut buffer = buffer_clone.lock().await;
+                    buffer.add_batch(sequence, frames);
+                }
 
-                if batch_count % 5 == 0 {
+                // Log every batch or every 5 seconds
+                if batch_count % 5 == 0 || last_log.elapsed().as_secs() >= 5 {
+                    let buffer = buffer_clone.lock().await;
                     let stats = buffer.stats();
-                    info!("Buffered {} batches, buffer: {} sequences, {} frames",
-                        batch_count, stats.sequences, stats.frames);
+                    info!(
+                        "📥 Buffering: received batch {} (total: {}), buffer: {} seqs / {} frames",
+                        sequence, batch_count, stats.sequences, stats.frames
+                    );
+                    last_log = std::time::Instant::now();
                 }
             }
-            info!("Buffering task stopped after {} batches", batch_count);
+            warn!("⚠️ Buffering task stopped - no more batches received (total: {})", batch_count);
         });
 
         // Wait for initial buffer
@@ -240,16 +266,26 @@ impl BufferController {
                 Ok(frame) => {
                     frame_count += 1;
 
-                    // Log stats every 5 seconds
+                    // Log stats every 5 seconds with detailed buffer info
                     if last_stats_time.elapsed().as_secs() >= 5 {
                         let buffer = self.buffer.lock().await;
                         let stats = buffer.stats();
                         let elapsed = start_time.elapsed().as_secs_f32();
                         let actual_fps = frame_count as f32 / elapsed;
 
+                        // Get sequence range in buffer
+                        let mut seqs: Vec<u64> = buffer.buffer.keys().copied().collect();
+                        seqs.sort();
+                        let seq_range = if !seqs.is_empty() {
+                            format!("{}-{}", seqs[0], seqs[seqs.len()-1])
+                        } else {
+                            "empty".to_string()
+                        };
+
                         info!(
-                            "Playback: {} frames ({:.1} FPS), buffer: {} seqs / {} frames, adaptive FPS: {:.1}",
-                            frame_count, actual_fps, stats.sequences, stats.frames, adaptive_fps
+                            "▶️  Playback: {} frames ({:.1} FPS), buffer: {} seqs / {} frames (seq range: {}, current: {}, frame idx: {}), adaptive FPS: {:.1}",
+                            frame_count, actual_fps, stats.sequences, stats.frames, seq_range,
+                            buffer.current_sequence, buffer.current_frame_index, adaptive_fps
                         );
                         last_stats_time = std::time::Instant::now();
                     }
@@ -260,8 +296,19 @@ impl BufferController {
                     }
                 }
                 Err(e) => {
-                    warn!("Buffer underrun: {} - waiting for more frames", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let (current_seq, buffer_seqs) = {
+                        let buffer = self.buffer.lock().await;
+                        let stats = buffer.stats();
+                        let seqs: Vec<u64> = buffer.buffer.keys().copied().collect();
+                        (stats.current_sequence, seqs)
+                    };
+
+                    warn!(
+                        "⚠️ Buffer underrun: {} - Current seq: {}, Available seqs: {:?}",
+                        e, current_seq, buffer_seqs
+                    );
+                    warn!("Waiting 2 seconds for more batches...");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }
         }

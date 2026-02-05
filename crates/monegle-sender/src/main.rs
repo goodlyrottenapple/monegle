@@ -2,10 +2,11 @@ mod capture;
 mod converter;
 mod batcher;
 mod blockchain;
+mod counter_mode;
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use monegle_core::{Config, StreamId};
+use monegle_core::Config;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -38,6 +39,10 @@ struct Args {
     /// Dry run mode: display ASCII video in terminal without sending to blockchain
     #[arg(long)]
     dry_run: bool,
+
+    /// Test counter mode: send frames with incrementing counter instead of camera
+    #[arg(long)]
+    counter: bool,
 }
 
 #[tokio::main]
@@ -115,7 +120,50 @@ async fn main() -> Result<()> {
     info!("Components initialized, starting pipeline");
     info!("Press Ctrl+C to stop");
 
-    if args.dry_run {
+    if args.counter {
+        // COUNTER TEST MODE: Generate test frames with incrementing counter
+        if args.dry_run {
+            // Counter test mode with terminal display only
+            counter_mode::run_counter_dry_run_mode(
+                width,
+                height,
+                fps,
+                sender_config.color_mode,
+            ).await?;
+        } else {
+            // Counter test mode with blockchain submission
+            let metadata = monegle_core::StreamMetadata {
+                fps: sender_config.fps,
+                width: sender_config.resolution[0],
+                height: sender_config.resolution[1],
+                compression_type: sender_config.compression,
+                character_set: sender_config.character_set,
+                color_mode: sender_config.color_mode,
+                frames_per_batch: sender_config.frames_per_batch,
+            };
+
+            let target_address = args.target
+                .unwrap_or_else(|| "0x0000000000000000000000000000000000000001".to_string());
+
+            let blockchain_sender = BlockchainSender::new(
+                &network_config.rpc_url,
+                &private_key,
+                &target_address,
+            ).await?;
+
+            counter_mode::run_counter_blockchain_mode(
+                width,
+                height,
+                fps,
+                sender_config.color_mode,
+                metadata,
+                stream_id,
+                sender_config.max_batch_size,
+                sender_config.keyframe_interval,
+                blockchain_sender,
+            ).await?;
+        }
+    } else if args.dry_run {
         // DRY RUN MODE: Camera → ASCII → Terminal Display
         run_dry_run_mode(camera_device, fps, ascii_converter).await?;
     } else {

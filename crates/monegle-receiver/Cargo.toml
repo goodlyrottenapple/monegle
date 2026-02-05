@@ -9,6 +9,14 @@ license.workspace = true
 name = "monegle-receiver"
 path = "src/main.rs"
 
+[[bin]]
+name = "frame-collector"
+path = "src/bin/frame-collector.rs"
+
+[[bin]]
+name = "adaptive-receiver"
+path = "src/bin/adaptive-receiver.rs"
+
 [dependencies]
 monegle-core.workspace = true
 anyhow.workspace = true
