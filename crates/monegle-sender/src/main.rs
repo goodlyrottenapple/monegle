@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     // Initialize blockchain sender (only if not dry-run)
     let (_sender_address, stream_id) = if !args.dry_run {
         let target_address = args.target.clone()
-            .unwrap_or_else(|| "0x0000000000000000000000000000000000000001".to_string());
+            .unwrap_or_else(|| sender_config.target_address.clone());
 
         let blockchain_sender = BlockchainSender::new(
             &network_config.rpc_url,
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
             };
 
             let target_address = args.target
-                .unwrap_or_else(|| "0x0000000000000000000000000000000000000001".to_string());
+                .unwrap_or_else(|| sender_config.target_address.clone());
 
             let blockchain_sender = BlockchainSender::new(
                 &network_config.rpc_url,
@@ -188,7 +188,7 @@ async fn main() -> Result<()> {
         );
 
         let target_address = args.target
-            .unwrap_or_else(|| "0x0000000000000000000000000000000000000001".to_string());
+            .unwrap_or_else(|| sender_config.target_address.clone());
 
         let blockchain_sender = BlockchainSender::new(
             &network_config.rpc_url,

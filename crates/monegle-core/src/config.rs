@@ -62,6 +62,10 @@ pub struct SenderConfig {
     /// Keyframe interval (full frame every N frames)
     #[serde(default = "default_keyframe_interval")]
     pub keyframe_interval: u64,
+
+    /// Target address for transactions
+    #[serde(default = "default_target_address")]
+    pub target_address: String,
 }
 
 /// Receiver configuration
@@ -93,6 +97,10 @@ fn default_max_batch_size() -> usize {
 
 fn default_keyframe_interval() -> u64 {
     30 // Every 30 frames
+}
+
+fn default_target_address() -> String {
+    "0x0000000000000000000000000000000000000001".to_string()
 }
 
 fn default_color_mode() -> ColorMode {
